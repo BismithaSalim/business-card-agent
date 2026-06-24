@@ -1,6 +1,7 @@
 streamlit
 openai
-supabase
+psycopg2-binary
+pgvector
 python-dotenv
 requests
 beautifulsoup4
