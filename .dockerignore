@@ -1,0 +1,8 @@
+.git
+.gitignore
+README.md
+k8s
+.gitlab-ci.yml
+__pycache__
+*.pyc
+.env
