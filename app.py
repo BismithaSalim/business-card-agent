@@ -9,9 +9,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Support both local .env and Streamlit Cloud secrets
+def get_secret(key):
+    try:
+        return st.secrets[key]
+    except:
+        return os.getenv(key)
+
 # Initialize clients
-supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+supabase = create_client(get_secret("SUPABASE_URL"), get_secret("SUPABASE_KEY"))
+openai_client = OpenAI(api_key=get_secret("OPENAI_API_KEY"))
 
 st.set_page_config(page_title="Business Card Intelligence Agent", page_icon="💼", layout="wide")
 
