@@ -1,0 +1,79 @@
+stages:
+  - build
+  - deploy
+
+variables:
+  AWS_DEFAULT_REGION: us-east-1
+  ECR_REGISTRY: 686255941176.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPO: business-card-agent-test
+  EKS_CLUSTER_NAME: eflix
+  KUBE_NAMESPACE: agent-test
+  AWS_ROLE_ARN: arn:aws:iam::686255941176:role/business-card-agent-gitlab-ci
+  # Kubernetes-executor runner: docker:dind is reached via the service alias
+  # (FF_NETWORK_PER_BUILD is enabled on this runner), TLS disabled.
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_BUILDKIT: "1"
+
+# Exchange the GitLab OIDC token for short-lived AWS credentials.
+.assume_aws: &assume_aws
+  - test -n "$AWS_ROLE_ARN" || (echo "AWS_ROLE_ARN not set"; exit 1)
+  - >
+    export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s"
+    $(aws sts assume-role-with-web-identity
+    --role-arn "$AWS_ROLE_ARN"
+    --role-session-name "bca-ci-${CI_PIPELINE_ID}"
+    --web-identity-token "$GITLAB_OIDC_TOKEN"
+    --duration-seconds 3600
+    --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]'
+    --output text))
+
+build:
+  stage: build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.donowsoft.com
+  before_script:
+    - apk add --no-cache aws-cli curl
+    - *assume_aws
+    - until docker info >/dev/null 2>&1; do echo "Waiting for Docker daemon..."; sleep 2; done
+    - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+  script:
+    - docker build -t "$ECR_REGISTRY/$ECR_REPO:$CI_COMMIT_SHORT_SHA" -t "$ECR_REGISTRY/$ECR_REPO:latest" .
+    - docker push "$ECR_REGISTRY/$ECR_REPO:$CI_COMMIT_SHORT_SHA"
+    - docker push "$ECR_REGISTRY/$ECR_REPO:latest"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+deploy_test:
+  stage: deploy
+  image: alpine:3.20
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.donowsoft.com
+  needs: [build]
+  before_script:
+    - apk add --no-cache aws-cli curl bash
+    - *assume_aws
+    - KUBECTL_VERSION=$(curl -Ls https://dl.k8s.io/release/stable.txt)
+    - curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+    - install -m 0755 kubectl /usr/local/bin/kubectl
+    - aws eks update-kubeconfig --region "$AWS_DEFAULT_REGION" --name "$EKS_CLUSTER_NAME"
+  script:
+    - kubectl create namespace "$KUBE_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+    - |
+      kubectl create secret generic business-card-agent-secrets \
+        --from-literal=DATABASE_URL="$DATABASE_URL" \
+        --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY" \
+        -n "$KUBE_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+    - kubectl apply -n "$KUBE_NAMESPACE" -f k8s/deployment.yaml
+    - kubectl set image deployment/business-card-agent business-card-agent="$ECR_REGISTRY/$ECR_REPO:$CI_COMMIT_SHORT_SHA" -n "$KUBE_NAMESPACE"
+    - kubectl rollout status deployment/business-card-agent -n "$KUBE_NAMESPACE" --timeout=180s
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  environment:
+    name: agent-test

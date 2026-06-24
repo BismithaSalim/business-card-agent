@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: business-card-agent
+  labels:
+    app: business-card-agent
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: business-card-agent
+  template:
+    metadata:
+      labels:
+        app: business-card-agent
+    spec:
+      containers:
+        - name: business-card-agent
+          image: 686255941176.dkr.ecr.us-east-1.amazonaws.com/business-card-agent-test:latest
+          envFrom:
+            - secretRef:
+                name: business-card-agent-secrets
+          ports:
+            - containerPort: 8501
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: business-card-agent
+  labels:
+    app: business-card-agent
+spec:
+  selector:
+    app: business-card-agent
+  ports:
+    - port: 80
+      targetPort: 8501
+  type: ClusterIP

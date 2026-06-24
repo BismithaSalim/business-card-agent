@@ -1,5 +1,8 @@
 import streamlit as st
-from supabase import create_client
+import psycopg2
+import psycopg2.extras
+from pgvector.psycopg2 import register_vector
+from pgvector import Vector
 from openai import OpenAI
 import os
 import json
@@ -16,8 +19,14 @@ def get_secret(key):
     except:
         return os.getenv(key)
 
-# Initialize clients
-supabase = create_client(get_secret("SUPABASE_URL"), get_secret("SUPABASE_KEY"))
+# ── Postgres (pgvector) connection ─────────────────────────────
+# A fresh connection per script run mirrors how the Supabase client was
+# (re-)instantiated on every Streamlit rerun. Closed explicitly via `with`.
+def get_conn():
+    conn = psycopg2.connect(get_secret("DATABASE_URL"), cursor_factory=psycopg2.extras.RealDictCursor)
+    register_vector(conn)
+    return conn
+
 openai_client = OpenAI(api_key=get_secret("OPENAI_API_KEY"))
 
 st.set_page_config(page_title="Business Card Intelligence Agent", page_icon="💼", layout="wide")
@@ -217,8 +226,17 @@ If a field is not found, use empty string "". No extra text."""},
                     "website": website, "address": address,
                     "contact_type": contact_type, "category": category, "subcategory": subcategory,
                 }
-                result = supabase.table("contacts").insert(record).execute()
-                contact_id = result.data[0]["id"]
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO contacts
+                               (name, designation, company, email, mobile, telephone, website, address, contact_type, category, subcategory)
+                               VALUES (%(name)s, %(designation)s, %(company)s, %(email)s, %(mobile)s, %(telephone)s, %(website)s, %(address)s, %(contact_type)s, %(category)s, %(subcategory)s)
+                               RETURNING id""",
+                            record,
+                        )
+                        contact_id = cur.fetchone()["id"]
+                    conn.commit()
                 st.success("✅ Contact saved!")
 
             research_url = website
@@ -229,11 +247,18 @@ If a field is not found, use empty string "". No extra text."""},
             if research_url:
                 with st.spinner("🔍 Researching company with AI..."):
                     intel = research_company(research_url, company)
-                    supabase.table("contacts").update({
-                        "company_summary": intel.get("company_summary", ""),
-                        "ai_tags": intel.get("ai_tags", []),
-                        "keywords": intel.get("keywords", []),
-                    }).eq("id", contact_id).execute()
+                    with get_conn() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """UPDATE contacts SET company_summary=%s, ai_tags=%s, keywords=%s WHERE id=%s""",
+                                (
+                                    intel.get("company_summary", ""),
+                                    psycopg2.extras.Json(intel.get("ai_tags", [])),
+                                    psycopg2.extras.Json(intel.get("keywords", [])),
+                                    contact_id,
+                                ),
+                            )
+                        conn.commit()
 
                     st.success("🧠 Company research complete!")
                     st.subheader("🏢 Company Intelligence")
@@ -243,12 +268,19 @@ If a field is not found, use empty string "". No extra text."""},
 
                     # Generate and save embedding
                     with st.spinner("⚡ Generating vector embedding..."):
-                        full_record = supabase.table("contacts").select("*").eq("id", contact_id).execute().data[0]
+                        with get_conn() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("SELECT * FROM contacts WHERE id=%s", (contact_id,))
+                                full_record = dict(cur.fetchone())
                         text_for_embedding = build_contact_text({**full_record, **intel})
                         embedding = generate_embedding(text_for_embedding)
-                        supabase.table("contacts").update({
-                            "embedding": embedding
-                        }).eq("id", contact_id).execute()
+                        with get_conn() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    "UPDATE contacts SET embedding=%s WHERE id=%s",
+                                    (Vector(embedding), contact_id),
+                                )
+                            conn.commit()
                         st.success("⚡ Vector embedding saved!")
             else:
                 st.warning("⚠️ No website or email — skipping company research.")
@@ -273,13 +305,20 @@ with tab2:
         load_btn = st.button("🔄 Load Contacts")
 
     if load_btn:
-        query = supabase.table("contacts").select("*").order("created_at", desc=True)
+        where_clauses = []
+        params = []
         if filter_type != "All":
-            query = query.eq("contact_type", filter_type)
+            where_clauses.append("contact_type = %s")
+            params.append(filter_type)
         if filter_category != "All":
-            query = query.eq("category", filter_category)
-        result = query.execute()
-        contacts = result.data
+            where_clauses.append("category = %s")
+            params.append(filter_category)
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT * FROM contacts {where_sql} ORDER BY created_at DESC", params)
+                contacts = [dict(r) for r in cur.fetchall()]
 
         st.markdown(f"**{len(contacts)} contact(s) found**")
         if contacts:
@@ -309,8 +348,10 @@ with tab3:
             search_category = st.selectbox("Filter by Category", ["All", "IT", "Cybersecurity", "Telecom", "Construction", "Healthcare", "Manufacturing", "Other"], key="tab3_category")
 
         if st.button("🔎 Search"):
-            result = supabase.table("contacts").select("*").execute()
-            contacts = result.data
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM contacts")
+                    contacts = [dict(r) for r in cur.fetchall()]
 
             # Filter in Python
             filtered = []
@@ -336,8 +377,10 @@ with tab3:
         if st.button("🤖 Search with AI") and ai_query:
             with st.spinner("🤖 AI is searching your contacts..."):
                 # Load all contacts
-                result = supabase.table("contacts").select("*").execute()
-                contacts = result.data
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT * FROM contacts")
+                        contacts = [dict(r) for r in cur.fetchall()]
 
                 if not contacts:
                     st.warning("No contacts in database yet!")
@@ -383,8 +426,9 @@ No extra text."""
                     matched_ids = json.loads(text)
                     matched_id_list = [m["id"] for m in matched_ids]
 
-                    # Filter contacts by matched IDs
-                    matched_contacts = [c for c in contacts if c["id"] in matched_id_list]
+                    # Filter contacts by matched IDs (id comes back as uuid.UUID from
+                    # psycopg2, so compare as strings against the AI's JSON ids)
+                    matched_contacts = [c for c in contacts if str(c["id"]) in matched_id_list]
 
                     st.markdown(f"**🤖 AI found {len(matched_contacts)} matching contact(s)**")
                     if matched_contacts:
@@ -405,13 +449,14 @@ No extra text."""
                 # Convert query to vector
                 query_embedding = generate_embedding(vector_query)
 
-                # Search using pgvector in Supabase
-                result = supabase.rpc("match_contacts", {
-                    "query_embedding": query_embedding,
-                    "match_count": 5
-                }).execute()
-
-                matches = result.data
+                # Search using the match_contacts() pgvector similarity function
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT * FROM match_contacts(%s, %s)",
+                            (Vector(query_embedding), 5),
+                        )
+                        matches = [dict(r) for r in cur.fetchall()]
                 st.markdown(f"**⚡ Found {len(matches)} semantically similar contact(s)**")
                 if matches:
                     for c in matches:
