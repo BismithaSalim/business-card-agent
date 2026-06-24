@@ -1,0 +1,7 @@
+streamlit
+openai
+supabase
+python-dotenv
+requests
+beautifulsoup4
+Pillow
