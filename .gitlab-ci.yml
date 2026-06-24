@@ -73,7 +73,7 @@ deploy_test:
         --from-literal=DATABASE_URL="$DATABASE_URL" \
         --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY" \
         -n "$KUBE_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
-    - kubectl apply -n "$KUBE_NAMESPACE" -f k8s/deployment.yaml
+    - kubectl apply -n "$KUBE_NAMESPACE" -f k8s/deployment.yaml -f k8s/ingress.yaml
     - kubectl set image deployment/business-card-agent business-card-agent="$ECR_REGISTRY/$ECR_REPO:$CI_COMMIT_SHORT_SHA" -n "$KUBE_NAMESPACE"
     - kubectl rollout status deployment/business-card-agent -n "$KUBE_NAMESPACE" --timeout=180s
   rules:
