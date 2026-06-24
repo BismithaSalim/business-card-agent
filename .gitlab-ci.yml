@@ -64,7 +64,10 @@ deploy_test:
     - install -m 0755 kubectl /usr/local/bin/kubectl
     - aws eks update-kubeconfig --region "$AWS_DEFAULT_REGION" --name "$EKS_CLUSTER_NAME"
   script:
-    - kubectl create namespace "$KUBE_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+    # The agent-test namespace is provisioned out-of-band (not here): this CI
+    # role's EKS access is scoped to the agent-test namespace only, and
+    # Namespace is a cluster-scoped resource, so it can't create/patch it
+    # (correctly — broadening this role's reach would be a security regression).
     - |
       kubectl create secret generic business-card-agent-secrets \
         --from-literal=DATABASE_URL="$DATABASE_URL" \
