@@ -6,4 +6,6 @@ python-dotenv
 requests
 beautifulsoup4
 Pillow
-streamlit-google-auth
+streamlit-oauth
+pdfplumber
+openpyxl
